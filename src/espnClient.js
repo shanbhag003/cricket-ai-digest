@@ -186,17 +186,45 @@ function normalizeMatch(summary) {
     }
   }
 
-  // Current batters, from the batting card (typeID "11").
-  const battingCard = (summary.matchcards || []).find((c) => c.typeID === "11");
-  const currentBatters = (battingCard?.playerDetails || [])
-    .filter((p) => p.dismissal === "not out" && p.runs !== "")
-    .map((p) => ({
-      name: p.playerName,
-      runs: Number(p.runs),
-      balls: Number(p.ballsFaced),
-      fours: Number(p.fours),
-      sixes: Number(p.sixes),
-    }));
+  // Current batters, from `rosters` — NOT from matchcards.
+  //
+  // matchcards is ESPN's scorecard block and it goes stale mid-innings: it sat
+  // frozen at "288 (2 wkts; 73 ovs)" while linescores had moved on to 302/2 at
+  // 78.3, so batter figures lagged reality by several overs. `rosters` carries
+  // per-player stats that track the live linescore, so it is the source of
+  // truth for anything about an individual.
+  const currentBatters = [];
+  const allBatters = [];
+  for (const side of summary.rosters || []) {
+    for (const p of side.roster || []) {
+      const stats = {};
+      for (const period of p.linescores || []) {
+        for (const inner of period.linescores || []) {
+          for (const cat of inner.statistics?.categories || []) {
+            for (const st of cat.stats || []) stats[st.name] = st.displayValue;
+          }
+        }
+      }
+      if (stats.batted !== "1") continue; // hasn't come to the crease
+
+      const b = {
+        name: p.athlete?.displayName || p.athlete?.shortName,
+        team: side.team?.displayName,
+        runs: Number(stats.runs || 0),
+        balls: Number(stats.ballsFaced || 0),
+        fours: Number(stats.fours || 0),
+        sixes: Number(stats.sixes || 0),
+        strikeRate: stats.strikeRate ? Number(stats.strikeRate) : null,
+        position: Number(stats.battingPosition || 0),
+        dismissal: stats.dismissalCard || null,
+      };
+      allBatters.push(b);
+      // "not out" = at the crease. "retired not out" is off the field, so a
+      // retired-hurt batter must not be reported as currently batting.
+      if (stats.dismissalCard === "not out") currentBatters.push(b);
+    }
+  }
+  currentBatters.sort((a, b) => a.position - b.position);
 
   // leaders is nested 4 levels deep. Flatten properly.
   const leaders = [];
@@ -241,6 +269,7 @@ function normalizeMatch(summary) {
 
     innings,
     currentBatters,
+    allBatters,
     leaders,
 
     // ESPN lists fixtures it doesn't actually score. Associate and lower-tier
