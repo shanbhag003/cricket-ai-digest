@@ -1,5 +1,3 @@
-import fetch from "node-fetch";
-
 /**
  * Posts a formatted digest to Slack via Incoming Webhook.
  * @param {object} match - normalized match object
