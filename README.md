@@ -28,9 +28,9 @@ ESPN summary endpoint         ~270 KB · fetched only on change
         │                     scorecard, batters, leaders, venue, status
         ▼
  isMaterialChange()  ──no──▶ stop. no Claude call.
-        │yes
+        │yes                  (thresholds vary by format — see below)
         ▼
- MIN_SECONDS_BETWEEN_DIGESTS floor  ──too soon──▶ hold, retry next tick
+ per-format digest floor  ──too soon──▶ hold, retry next tick
         │
         ▼
      Claude ──▶ { analyst_digest, fan_digest }
@@ -65,6 +65,23 @@ survive a five-day match.
     team that hasn't batted appears as `0/0 (73 ov)`. These rows are dropped —
     otherwise the model confidently reports a scoreline that never happened.
 
+## Choosing a match
+
+The dashboard has a match picker: two filters (International/Domestic, and
+Live/Scheduled/Finished) narrowing a dropdown of everything ESPN currently
+lists, with start times in IST.
+
+`TEAM_FILTER` sets the startup default; the dropdown overrides it at runtime.
+Switching match clears per-match state so the new match establishes a baseline
+silently rather than immediately emitting a digest.
+
+Two limits worth knowing: ESPN's feed covers roughly a **3-day window**, so this
+is a live-and-upcoming picker, not a season calendar — there is no endpoint
+listing future series that haven't started. And the switch is **global**, not
+per-user: whoever picks last changes it for everyone connected.
+
+Backed by `GET /api/matches` and `POST /api/track`.
+
 ## When Claude actually gets called
 
 Polling frequently is cheap. Calling an LLM on every tick is not — and worse, it
@@ -73,28 +90,60 @@ produces a stream of digests that say nothing. `isMaterialChange()` in
 
 | Trigger | Example |
 |---|---|
-| First sighting of the match | server just restarted |
+| First sighting of the match | server just restarted (sets baseline, **no digest**) |
 | Match status changed | Not Started → Live → Finished |
 | Status detail changed | "Match delayed by a wet outfield" appears or clears |
 | New innings started | a declaration, or the second innings beginning |
 | A wicket fell | 288/2 → 288/3 |
-| Team crossed a 50 | 299 → 301 fires; 292 → 296 does not |
-| Crossed a 10-over mark | 79.4 ov → 80.1 ov |
+| Team crossed a run step | see table below |
+| Crossed an over step or a key over | see table below |
 | Batter milestone, or a new batter at the crease | 149 → 151 |
 | Follow-on enforced | |
 | Fourth-innings target set | |
 
-Deliberately invisible: singles, twos, boundaries, dot balls, maidens, over-by-over
-ticking.
+Deliberately invisible: singles, twos, boundaries, dot balls, maidens,
+over-by-over ticking.
 
-On top of that, `MIN_SECONDS_BETWEEN_DIGESTS` is a hard floor per match, so a
-collapse of three wickets in two overs doesn't become three API calls in ninety
-seconds. Note the asymmetry: a *skipped* (non-material) change advances the
-baseline, but a *held* (rate-limited) change does not — so a held wicket still
-fires on the next tick rather than being swallowed.
+### Thresholds are format-aware
 
-Realistic volume for a full day's Test cricket: **~25–30 Claude calls**. Ungated at
-60-second polling it would be ~480.
+Fifty runs is an hour's grind in a Test and five overs in a T20. Over 10 is a
+routine marker in a Test and the halfway point of a T20 innings. So the
+thresholds differ, driven by `class.eventType` from ESPN (`Test` / `ODI` /
+`T20`), with `limitedOvers` as fallback:
+
+| | Test / first-class | ODI / List A | T20 |
+|---|---|---|---|
+| Team run step | 50 | 50 | 50 |
+| Over step | 10 | 10 | 5 |
+| Key overs | 80 (second new ball) | 10, 40 (powerplay end, death) | 6, 16 (powerplay end, death) |
+| Batter run step | 50 | 50 | 50 |
+| Digest floor | 180s | 120s | 90s |
+
+The **key overs** are the point of this. They're the moments that matter in that
+format specifically, and none of them fall on a regular step — a modulo rule
+alone misses the T20 powerplay transitions entirely, which are exactly the
+moments a fan most wants explained.
+
+Rules live in `FORMAT_RULES` in `espnClient.js`. Edit there.
+
+### Expected volume
+
+Ball-by-ball simulation of a realistic innings:
+
+| Format | Gate fires | Per match | Rate |
+|---|---|---|---|
+| T20 (20 ov, 175/6) | 17 / innings | ~34 | ~10/hr |
+| ODI (50 ov, 290/8) | 22 / innings | ~44 | ~6/hr |
+| Test (90 ov, 300/5) | 20 / day | ~20/day | ~3/hr |
+
+A T20 runs about 3x the Test rate per hour, which is correct — a T20 genuinely
+is denser. At ~34 calls it costs roughly 14 cents. Ungated at 60-second polling
+it would be ~480 calls/day.
+
+**Known gap:** The Hundred is 100 balls, not overs, and `detectFormat()` falls it
+through to `t20`. What ESPN puts in the `overs` field for it is unverified, so
+the over-based triggers there are untested. Check `/api/debug/raw` before
+relying on it.
 
 ## Setup
 
@@ -116,9 +165,11 @@ recurring source of `ERR_MODULE_NOT_FOUND` on deploy.)
 | `CLAUDE_MODEL` | `claude-sonnet-5` | `claude-haiku-4-5-20251001` is plenty here and cheaper |
 | `TEAM_FILTER` | — | e.g. `India,Sri Lanka`. Matched against both series name and event name. Blank = first live match found |
 | `POLL_INTERVAL_SECONDS` | `60` | seconds, not minutes |
-| `MIN_SECONDS_BETWEEN_DIGESTS` | `120` | hard floor between Claude calls per match |
 | `SLACK_WEBHOOK_URL` | — | optional; blank skips Slack |
 | `PORT` | `3000` | |
+| `MIN_SECONDS_BETWEEN_DIGESTS` | *(unset)* | overrides the per-format floor. Leave unset |
+| `DIGEST_ON_STARTUP` | `false` | `true` makes every restart emit a digest. Leave false |
+| `STATE_FILE` | `/tmp/cricket-digest-state.json` | restart-safe state cache |
 
 `TEAM_FILTER` is matched against the series name **and** the event name together.
 Series name alone is unreliable — "The Hundred Men's Competition" contains no team
@@ -159,7 +210,7 @@ Three failure modes, three numbers. The point is that they don't look alike.
 **Did it find the right match?** Check the `Locked onto:` line in the logs.
 
 **Is the data any good?** `GET /api/debug/raw` returns the exact object handed to
-Claude. This is the check people skip and the one that catches real problems — a
+Claude, including the detected `formatKey`. This is the check people skip and the one that catches real problems — a
 digest generated from all-null fields still *looks* like a success in the logs. If
 you can't read that JSON and immediately recognise the match, neither can Claude.
 
