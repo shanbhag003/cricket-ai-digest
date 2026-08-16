@@ -6,7 +6,14 @@ import { WebSocketServer } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { getLiveMatches, isMaterialChange } from "./espnClient.js";
+import {
+  getLiveMatches,
+  isMaterialChange,
+  setTrackedMatch,
+  getTrackedMatch,
+  getFormatRules,
+} from "./espnClient.js";
+import { listMatches } from "./matchDiscovery.js";
 import { generateDigest } from "./digestGenerator.js";
 import { postToSlack } from "./slackNotifier.js";
 
@@ -20,8 +27,11 @@ const wss = new WebSocketServer({ server });
 
 const PORT = process.env.PORT || 3000;
 const POLL_SECONDS = parseInt(process.env.POLL_INTERVAL_SECONDS, 10) || 60;
-const MIN_SECONDS_BETWEEN_DIGESTS =
-  parseInt(process.env.MIN_SECONDS_BETWEEN_DIGESTS, 10) || 120;
+// If set, this overrides the per-format default. Left unset (recommended),
+// each format uses its own floor: Test 180s, ODI 120s, T20 90s.
+const MIN_GAP_OVERRIDE = parseInt(process.env.MIN_SECONDS_BETWEEN_DIGESTS, 10) || null;
+const minGapFor = (match) =>
+  MIN_GAP_OVERRIDE ?? getFormatRules(match).minGapSeconds;
 
 // A restart must NOT produce a digest. Without this, every crash, redeploy or
 // spin-down wake emits a fresh digest for a match state that hasn't moved —
@@ -126,7 +136,9 @@ async function pollAndDigest() {
       lastDigestAt.set(match.matchId, Date.now());
       stats.baselinesEstablished++;
       saveState();
-      console.log(`[baseline] ${stats.lastMatchSeen} — no digest (cold start)`);
+      console.log(
+        `[baseline] ${stats.lastMatchSeen} — ${getFormatRules(match).label}, no digest (cold start)`
+      );
       broadcast({ type: "baseline", match: stats.lastMatchSeen, at: stats.lastPollAt });
       continue;
     }
@@ -146,10 +158,13 @@ async function pollAndDigest() {
       continue;
     }
 
+    const minGap = minGapFor(match);
     const since = Date.now() - (lastDigestAt.get(match.matchId) || 0);
-    if (since < MIN_SECONDS_BETWEEN_DIGESTS * 1000) {
+    if (since < minGap * 1000) {
       stats.suppressedByFloor++;
-      console.log(`[hold] material, but only ${Math.round(since / 1000)}s since last digest`);
+      console.log(
+        `[hold] material, but only ${Math.round(since / 1000)}s since last digest (${match.formatKey} floor ${minGap}s)`
+      );
       continue; // baseline NOT advanced — retry next tick
     }
 
@@ -164,6 +179,7 @@ async function pollAndDigest() {
         teams: `${match.team1} vs ${match.team2}`,
         venue: match.venue,
         status: match.status,
+        format: match.matchFormat,
         score,
         fingerprint: match.fingerprint, // enables the dedupe check above
         analystDigest: digest.analyst_digest,
@@ -187,6 +203,42 @@ async function pollAndDigest() {
     }
   }
 }
+
+app.use(express.json());
+
+// What's on right now, for the dashboard dropdown.
+app.get("/api/matches", async (req, res) => {
+  try {
+    const data = await listMatches({ force: req.query.force === "true" });
+    res.json({ ...data, tracking: getTrackedMatch() });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Switch which match the poller follows.
+// NOTE: this is a GLOBAL switch, not per-user. Whoever picks last wins for
+// everyone connected. Fine for a single-operator dashboard; would need
+// per-connection subscriptions to be a real multi-user product.
+app.post("/api/track", async (req, res) => {
+  const { leagueId, eventId, seriesName } = req.body || {};
+  if (!leagueId || !eventId) {
+    return res.status(400).json({ error: "leagueId and eventId are required" });
+  }
+
+  setTrackedMatch({ leagueId, eventId, leagueName: seriesName });
+
+  // Clear per-match state so the new match establishes a baseline silently
+  // instead of immediately emitting a digest for a state nobody has seen change.
+  lastMatchState.clear();
+  lastDigestAt.clear();
+  saveState();
+
+  broadcast({ type: "tracking", leagueId, eventId, seriesName });
+  res.json({ ok: true, tracking: getTrackedMatch() });
+
+  pollAndDigest().catch((e) => console.error("post-switch poll failed:", e.message));
+});
 
 app.get("/api/history", (req, res) => res.json({ history: digestHistory }));
 
@@ -218,7 +270,8 @@ setInterval(pollAndDigest, POLL_SECONDS * 1000);
 server.listen(PORT, () => {
   console.log(`Listening on ${PORT} — polling every ${POLL_SECONDS}s`);
   console.log(
-    `Floor: ${MIN_SECONDS_BETWEEN_DIGESTS}s · digest on startup: ${DIGEST_ON_STARTUP}`
+    `Digest floor: ${MIN_GAP_OVERRIDE ? MIN_GAP_OVERRIDE + "s (override)" : "per-format"}` +
+      ` · digest on startup: ${DIGEST_ON_STARTUP}`
   );
   pollAndDigest();
 });
