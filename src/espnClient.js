@@ -1,5 +1,3 @@
-import fetch from "node-fetch";
-
 // ---------------------------------------------------------------------------
 // ESPN public cricket endpoints (unofficial, no key).
 //
