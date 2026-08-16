@@ -15,8 +15,8 @@
     --cyan: #3fd8e0;
     --text-primary: #e8edf0;
     --text-dim: #6b7a85;
-    --ops-color: #3fd8e0;
-    --partner-color: #ff9500;
+    --analyst-color: #3fd8e0;
+    --fan-color: #ff9500;
     --live-red: #ff3b3b;
   }
 
@@ -146,10 +146,10 @@
     padding: 14px 16px;
   }
 
-  .digest-cell.ops { border-right: 1px solid var(--panel-border); }
+  .digest-cell.analyst { border-right: 1px solid var(--panel-border); }
 
   @media (max-width: 640px) {
-    .digest-cell.ops { border-right: none; border-bottom: 1px solid var(--panel-border); }
+    .digest-cell.analyst { border-right: none; border-bottom: 1px solid var(--panel-border); }
   }
 
   .digest-label {
@@ -160,8 +160,16 @@
     margin-bottom: 6px;
   }
 
-  .digest-cell.ops .digest-label { color: var(--ops-color); }
-  .digest-cell.partner .digest-label { color: var(--partner-color); }
+  .digest-sublabel {
+    font-family: 'Archivo', sans-serif;
+    font-size: 10.5px;
+    font-style: italic;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .digest-cell.analyst .digest-label { color: var(--analyst-color); }
+  .digest-cell.fan .digest-label { color: var(--fan-color); }
 
   .digest-text {
     font-size: 13.5px;
@@ -207,7 +215,7 @@
     </div>
 
     <footer>
-      Source: CricketData.org → Claude (dual-persona digest) → Ops / Broadcast Partner views · Polls every few minutes
+      Source: ESPN Cricket API → Claude (Analyst / Fan digest) · Polls every few minutes
     </footer>
   </div>
 
@@ -233,13 +241,15 @@
           <div class="meta">${entry.venue}<br>${new Date(entry.generatedAt).toLocaleTimeString()}</div>
         </div>
         <div class="digest-row">
-          <div class="digest-cell ops">
-            <div class="digest-label">Ops Digest</div>
-            <div class="digest-text">${entry.opsDigest}</div>
+          <div class="digest-cell analyst">
+            <div class="digest-label">Analyst</div>
+            <div class="digest-sublabel">"Give me the facts behind the moment."</div>
+            <div class="digest-text">${entry.analystDigest}</div>
           </div>
-          <div class="digest-cell partner">
-            <div class="digest-label">Broadcast Partner Digest</div>
-            <div class="digest-text">${entry.partnerDigest}</div>
+          <div class="digest-cell fan">
+            <div class="digest-label">Fan</div>
+            <div class="digest-sublabel">"Tell me why this moment matters."</div>
+            <div class="digest-text">${entry.fanDigest}</div>
           </div>
         </div>
       `;
@@ -279,8 +289,6 @@
     }
 
     connect();
-
-    
   </script>
 </body>
 </html>
