@@ -185,6 +185,51 @@
     font-size: 13px;
   }
 
+  .picker {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+
+  .picker-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+
+  .picker select, .picker button {
+    background: var(--bg);
+    color: var(--text-primary);
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    padding: 8px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .picker select:focus, .picker button:focus {
+    outline: none;
+    border-color: var(--cyan);
+  }
+
+  #match-select { width: 100%; }
+
+  .picker button:hover { border-color: var(--amber); color: var(--amber); }
+
+  .picker button[disabled] { opacity: 0.5; cursor: default; }
+
+  .picker-note {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    margin-top: 10px;
+  }
+
   footer {
     margin-top: 40px;
     padding-top: 16px;
@@ -207,6 +252,25 @@
         <span id="conn-status">Connecting…</span>
       </div>
     </header>
+
+    <div class="picker">
+      <div class="picker-row">
+        <select id="filter-level">
+          <option value="all">All levels</option>
+          <option value="International">International</option>
+          <option value="Domestic">Domestic</option>
+        </select>
+        <select id="filter-state">
+          <option value="all">Live + Scheduled</option>
+          <option value="in">Live only</option>
+          <option value="pre">Scheduled only</option>
+          <option value="post">Finished</option>
+        </select>
+        <button id="refresh-matches" type="button">Refresh</button>
+      </div>
+      <select id="match-select"><option>Loading matches…</option></select>
+      <div class="picker-note" id="picker-note"></div>
+    </div>
 
     <div id="status-bar">Waiting for first poll…</div>
 
@@ -256,6 +320,87 @@
       feed.prepend(el);
     }
 
+    // ---- match picker ----------------------------------------------------
+    const matchSelect = document.getElementById('match-select');
+    const filterLevel = document.getElementById('filter-level');
+    const filterState = document.getElementById('filter-state');
+    const refreshBtn = document.getElementById('refresh-matches');
+    const pickerNote = document.getElementById('picker-note');
+
+    let allMatches = [];
+    let tracking = null;
+
+    function renderMatchOptions() {
+      const level = filterLevel.value;
+      const state = filterState.value;
+
+      const visible = allMatches.filter(m =>
+        (level === 'all' || m.level === level) &&
+        (state === 'all' ? m.state !== 'post' : m.state === state)
+      );
+
+      if (visible.length === 0) {
+        matchSelect.innerHTML = '<option>No matches match these filters</option>';
+        return;
+      }
+
+      matchSelect.innerHTML = visible.map(m => {
+        const badge = m.state === 'in' ? '● LIVE' : m.state === 'post' ? '· done' : '○ ' + m.startIST;
+        const sel = tracking && tracking.eventId === m.eventId ? ' selected' : '';
+        return `<option value="${m.leagueId}|${m.eventId}"${sel}>`
+          + `${badge}  ·  ${m.matchName}  ·  ${m.format} ${m.level === 'International' ? 'Intl' : 'Dom'}`
+          + `  ·  ${m.seriesName}</option>`;
+      }).join('');
+    }
+
+    async function loadMatches(force) {
+      try {
+        const res = await fetch('/api/matches' + (force ? '?force=true' : ''));
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        allMatches = data.matches;
+        tracking = data.tracking;
+        renderMatchOptions();
+        pickerNote.textContent =
+          `${data.counts.live} live · ${data.counts.scheduled} scheduled · `
+          + `${data.counts.international} international · ${data.counts.domestic} domestic`;
+      } catch (err) {
+        matchSelect.innerHTML = `<option>Could not load matches: ${err.message}</option>`;
+      }
+    }
+
+    matchSelect.addEventListener('change', async () => {
+      const [leagueId, eventId] = matchSelect.value.split('|');
+      if (!leagueId || !eventId) return;
+      const chosen = allMatches.find(m => m.eventId === eventId);
+      matchSelect.disabled = true;
+      statusBar.textContent = `Switching to ${chosen ? chosen.matchName : eventId}…`;
+      try {
+        const res = await fetch('/api/track', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ leagueId, eventId, seriesName: chosen && chosen.seriesName })
+        });
+        const out = await res.json();
+        if (out.error) throw new Error(out.error);
+        tracking = out.tracking;
+        statusBar.textContent =
+          `Now tracking ${chosen ? chosen.matchName : eventId}. Establishing baseline — `
+          + `the next digest arrives when something material happens.`;
+      } catch (err) {
+        statusBar.textContent = `Could not switch match: ${err.message}`;
+      } finally {
+        matchSelect.disabled = false;
+      }
+    });
+
+    filterLevel.addEventListener('change', renderMatchOptions);
+    filterState.addEventListener('change', renderMatchOptions);
+    refreshBtn.addEventListener('click', () => loadMatches(true));
+
+    loadMatches(false);
+    setInterval(() => loadMatches(false), 120000);
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${protocol}//${window.location.host}`);
@@ -284,6 +429,14 @@
           statusBar.textContent = `Last update: ${payload.entry.teams} at ${new Date(payload.entry.generatedAt).toLocaleTimeString()}`;
         } else if (payload.type === 'status') {
           statusBar.textContent = `${payload.message} (checked ${new Date(payload.checkedAt).toLocaleTimeString()})`;
+        } else if (payload.type === 'baseline') {
+          statusBar.textContent = `Baseline set: ${payload.match} — no digest (nothing has changed yet).`;
+        } else if (payload.type === 'tick') {
+          statusBar.textContent = `${payload.match} · checked ${new Date(payload.at).toLocaleTimeString()} · no material change`;
+        } else if (payload.type === 'tracking') {
+          loadMatches(true);
+        } else if (payload.type === 'error') {
+          statusBar.textContent = `⚠ ${payload.scope} error: ${payload.message}`;
         }
       };
     }
