@@ -69,8 +69,8 @@ async function pollAndDigest() {
         teams: `${match.team1} vs ${match.team2}`,
         venue: match.venue,
         status: match.status,
-        opsDigest: digest.ops_digest,
-        partnerDigest: digest.partner_digest,
+        analystDigest: digest.analyst_digest,
+        fanDigest: digest.fan_digest,
         generatedAt: new Date().toISOString(),
       };
 
