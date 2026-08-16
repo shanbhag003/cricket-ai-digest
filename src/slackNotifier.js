@@ -3,7 +3,7 @@ import fetch from "node-fetch";
 /**
  * Posts a formatted digest to Slack via Incoming Webhook.
  * @param {object} match - normalized match object
- * @param {object} digest - { ops_digest, partner_digest }
+ * @param {object} digest - { analyst_digest, fan_digest }
  */
 export async function postToSlack(match, digest) {
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
@@ -24,11 +24,11 @@ export async function postToSlack(match, digest) {
       },
       {
         type: "section",
-        text: { type: "mrkdwn", text: `*Ops Digest:*\n${digest.ops_digest}` },
+        text: { type: "mrkdwn", text: `*🔍 Analyst — the facts behind the moment:*\n${digest.analyst_digest}` },
       },
       {
         type: "section",
-        text: { type: "mrkdwn", text: `*Broadcast Partner Digest:*\n${digest.partner_digest}` },
+        text: { type: "mrkdwn", text: `*🏏 Fan — why this moment matters:*\n${digest.fan_digest}` },
       },
       { type: "divider" },
     ],
