@@ -434,7 +434,6 @@
       return data;
     }
 
-    let hasEntries = false;
 
     const lbScore = document.getElementById('lb-score');
     const lbSub = document.getElementById('lb-sub');
@@ -480,15 +479,16 @@
       }
     });
 
-    function renderEntry(entry) {
-      if (!hasEntries) {
-        feed.innerHTML = '';
-        hasEntries = true;
-      }
+    // The feed is derived from `entries`, never appended to blindly. The server
+    // replays full history on every WebSocket connection, and mobile drops the
+    // socket constantly (backgrounding, screen lock), so an append-only feed
+    // duplicates every entry on each reconnect.
+    let entries = [];
 
-      const el = document.createElement('div');
-      el.className = 'entry';
-      el.innerHTML = `
+    const entryKey = (e) => `${e.matchId}|${e.generatedAt}`;
+
+    function entryHtml(entry) {
+      return `
         <div class="entry-head">
           <div class="teams">${entry.teams}</div>
           <div class="meta">${entry.venue}<br>${new Date(entry.generatedAt).toLocaleTimeString()}</div>
@@ -506,7 +506,36 @@
           </div>
         </div>
       `;
-      feed.prepend(el);
+    }
+
+    function renderFeed() {
+      if (entries.length === 0) {
+        feed.innerHTML = '<div class="empty-state">No digests yet. Once the match moves, entries appear here.</div>';
+        return;
+      }
+      feed.innerHTML = '';
+      for (const entry of entries) {           // entries[0] is newest
+        const el = document.createElement('div');
+        el.className = 'entry';
+        el.innerHTML = entryHtml(entry);
+        feed.appendChild(el);
+      }
+    }
+
+    /** Merge new entries in, dropping any we already have. */
+    function mergeEntries(incoming) {
+      const seen = new Set(entries.map(entryKey));
+      let added = 0;
+      for (const e of incoming) {
+        if (seen.has(entryKey(e))) continue;
+        seen.add(entryKey(e));
+        entries.push(e);
+        added++;
+      }
+      entries.sort((a, b) => new Date(b.generatedAt) - new Date(a.generatedAt));
+      if (entries.length > 50) entries.length = 50;
+      if (added) renderFeed();
+      return added;
     }
 
     // ---- match picker ----------------------------------------------------
@@ -605,7 +634,16 @@
 
     let socket = null;
 
+    let reconnectTimer = null;
+
     function connect() {
+      // Never run two sockets at once. onclose schedules a retry and
+      // visibilitychange can also reconnect; without this guard both fire and
+      // each socket replays history independently.
+      if (socket && (socket.readyState === WebSocket.OPEN ||
+                     socket.readyState === WebSocket.CONNECTING)) return;
+      clearTimeout(reconnectTimer);
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${protocol}//${window.location.host}`);
       socket = ws;
@@ -616,22 +654,25 @@
       };
 
       ws.onclose = () => {
+        if (socket !== ws) return;   // superseded by a newer socket
         connStatus.textContent = 'Disconnected — retrying…';
         liveDot.classList.remove('active');
-        setTimeout(connect, 3000);
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 3000);
       };
 
       ws.onmessage = (event) => {
         const payload = JSON.parse(event.data);
 
         if (payload.type === 'history') {
-          payload.history.slice().reverse().forEach(renderEntry);
-          if (payload.history.length === 0) {
-            statusBar.textContent = 'No digests yet. Waiting for a live match to update.';
+          mergeEntries(payload.history || []);
+          if (entries.length === 0) {
+            statusBar.textContent = 'No digests yet. Waiting for the match to move.';
           }
         } else if (payload.type === 'digest') {
-          renderEntry(payload.entry);
-          statusBar.textContent = `Last update: ${payload.entry.teams} at ${new Date(payload.entry.generatedAt).toLocaleTimeString()}`;
+          if (mergeEntries([payload.entry])) {
+            statusBar.textContent = `Last update: ${payload.entry.teams} at ${new Date(payload.entry.generatedAt).toLocaleTimeString()}`;
+          }
         } else if (payload.type === 'status') {
           statusBar.textContent = `${payload.message} (checked ${new Date(payload.checkedAt).toLocaleTimeString()})`;
         } else if (payload.type === 'baseline') {
@@ -658,12 +699,7 @@
     // the socket is dead. Re-check on resume and reconnect if needed.
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        connStatus.textContent = 'Reconnecting…';
-        liveDot.classList.remove('active');
-        try { socket && socket.close(); } catch (e) {}
-        connect();
-      }
+      connect(); // no-ops if the socket is still healthy
       loadMatches(false); // list may be stale after time in the background
     });
   </script>
