@@ -280,12 +280,7 @@
 
     connect();
 
-    // Also load history via REST on first paint, in case WS takes a moment
-    fetch('/api/history').then(r => r.json()).then(data => {
-      if (!hasEntries && data.history.length > 0) {
-        data.history.slice().reverse().forEach(renderEntry);
-      }
-    }).catch(() => {});
+    
   </script>
 </body>
 </html>
