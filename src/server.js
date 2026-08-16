@@ -12,6 +12,7 @@ import {
   setTrackedMatch,
   getTrackedMatch,
   getFormatRules,
+  getRecentDeliveries,
 } from "./espnClient.js";
 import { listMatches } from "./matchDiscovery.js";
 import { generateDigest } from "./digestGenerator.js";
@@ -129,7 +130,7 @@ function liveSnapshot(match) {
 
 /** Generate a digest, store it, push it to the console. Shared by the poller
  *  and the manual "Digest now" button. */
-async function produceDigest(match, reason) {
+async function produceDigest(match, reason, prevMatch = null) {
   const score = match.innings.find((i) => i.isBatting)?.score || match.status;
 
   // No innings data means any digest would be a fixture preview dressed up as
@@ -143,7 +144,12 @@ async function produceDigest(match, reason) {
     return { ok: false, error: why, noData: true };
   }
   try {
-    const digest = await generateDigest(match);
+    // Ball-by-ball is fetched only here, when a digest is actually being
+    // written — never on routine polls.
+    const deliveries = await getRecentDeliveries(
+      parseInt(process.env.BALL_BY_BALL_COUNT, 10) || 12
+    );
+    const digest = await generateDigest(match, { reason, previous: prevMatch, deliveries });
     const entry = {
       matchId: match.matchId,
       teams: `${match.team1} vs ${match.team2}`,
@@ -251,7 +257,7 @@ async function pollAndDigest() {
     broadcast({ type: "tick", match: stats.lastMatchSeen, snapshot: liveSnapshot(match) });
     lastMatchState.set(match.matchId, match);
     lastDigestAt.set(match.matchId, Date.now());
-    await produceDigest(match, reason);
+    await produceDigest(match, reason, prev);
   }
 }
 
@@ -302,9 +308,12 @@ app.post("/api/digest-now", async (req, res) => {
       return res.status(404).json({ error: "No match currently tracked." });
     }
     const match = matches[0];
+    // capture the PREVIOUS state before overwriting it, so the digest can
+    // describe what changed rather than comparing the match against itself
+    const prevMatch = lastMatchState.get(match.matchId) || null;
     lastMatchState.set(match.matchId, match);
     lastDigestAt.set(match.matchId, Date.now());
-    const out = await produceDigest(match, "manual");
+    const out = await produceDigest(match, "manual", prevMatch);
     res.status(out.ok ? 200 : out.noData ? 422 : 500).json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
