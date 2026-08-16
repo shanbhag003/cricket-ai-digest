@@ -25,7 +25,9 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const PORT = process.env.PORT || 3000;
-const POLL_SECONDS = parseInt(process.env.POLL_INTERVAL_SECONDS, 10) || 60;
+// The score strip refreshes at this rate. Costs bandwidth only — the ~6 KB
+// scoreboard endpoint is what gets polled, and the Claude gate is independent.
+const POLL_SECONDS = parseInt(process.env.POLL_INTERVAL_SECONDS, 10) || 30;
 // If set, this overrides the per-format default. Left unset (recommended),
 // each format uses its own floor: Test 180s, ODI 120s, T20 90s.
 const MIN_GAP_OVERRIDE = parseInt(process.env.MIN_SECONDS_BETWEEN_DIGESTS, 10) || null;
@@ -44,6 +46,7 @@ const STATE_FILE = process.env.STATE_FILE || "/tmp/cricket-digest-state.json";
 
 const lastMatchState = new Map();
 const lastDigestAt = new Map();
+let lastSnapshot = null;          // most recent live state, for the heartbeat
 
 const digestHistory = [];
 const MAX_HISTORY = 50;
@@ -107,7 +110,7 @@ function broadcast(payload) {
 /** Compact snapshot pushed to the console every poll, so it never looks dead. */
 function liveSnapshot(match) {
   const bat = match.innings.find((i) => i.isBatting);
-  return {
+  lastSnapshot = {
     teams: `${match.team1} v ${match.team2}`,
     score: bat ? bat.score : match.status,
     runRate: bat?.runRate ?? null,
@@ -121,6 +124,7 @@ function liveSnapshot(match) {
     liveDataAvailable: match.liveDataAvailable,
     at: new Date().toISOString(),
   };
+  return lastSnapshot;
 }
 
 /** Generate a digest, store it, push it to the console. Shared by the poller
@@ -186,7 +190,15 @@ async function pollAndDigest() {
     return;
   }
 
-  if (matches.length === 0) return;
+  // getLiveMatches() returns [] when nothing changed since the last poll.
+  // Still tell the console we checked — otherwise the score strip freezes on an
+  // old timestamp during any quiet spell and looks like the app has died.
+  if (matches.length === 0) {
+    if (lastSnapshot) {
+      broadcast({ type: "heartbeat", snapshot: { ...lastSnapshot, at: new Date().toISOString() } });
+    }
+    return;
+  }
 
   for (const match of matches) {
     const score = match.innings.find((i) => i.isBatting)?.score || match.status;
@@ -236,6 +248,7 @@ async function pollAndDigest() {
     }
 
     stats.changesSeen++;
+    broadcast({ type: "tick", match: stats.lastMatchSeen, snapshot: liveSnapshot(match) });
     lastMatchState.set(match.matchId, match);
     lastDigestAt.set(match.matchId, Date.now());
     await produceDigest(match, reason);
@@ -270,6 +283,7 @@ app.post("/api/track", async (req, res) => {
   // instead of immediately emitting a digest for a state nobody has seen change.
   lastMatchState.clear();
   lastDigestAt.clear();
+  lastSnapshot = null;
   saveState();
 
   broadcast({ type: "tracking", leagueId, eventId, seriesName });
