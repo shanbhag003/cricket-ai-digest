@@ -195,6 +195,7 @@ function normalizeMatch(summary) {
   // truth for anything about an individual.
   const currentBatters = [];
   const allBatters = [];
+  const bowlers = [];
   for (const side of summary.rosters || []) {
     for (const p of side.roster || []) {
       const stats = {};
@@ -205,6 +206,20 @@ function normalizeMatch(summary) {
           }
         }
       }
+      if (stats.bowled === "1") {
+        bowlers.push({
+          name: p.athlete?.displayName || p.athlete?.shortName,
+          team: side.team?.displayName,
+          overs: stats.overs,
+          maidens: Number(stats.maidens || 0),
+          runsConceded: Number(stats.conceded || 0),
+          wickets: Number(stats.wickets || 0),
+          economy: stats.economyRate ? Number(stats.economyRate) : null,
+          dots: Number(stats.dots || 0),
+          figures: `${stats.wickets || 0}/${stats.conceded || 0} (${stats.overs || 0})`,
+        });
+      }
+
       if (stats.batted !== "1") continue; // hasn't come to the crease
 
       const b = {
@@ -225,6 +240,27 @@ function normalizeMatch(summary) {
     }
   }
   currentBatters.sort((a, b) => a.position - b.position);
+  bowlers.sort((a, b) => b.wickets - a.wickets || a.runsConceded - b.runsConceded);
+
+  // Partnerships come from matchcards, which goes stale mid-innings (see above).
+  // Only trust them when the card's total still matches the live linescore —
+  // otherwise the "current" partnership is several overs out of date and would
+  // put wrong numbers in the digest.
+  const battingCard = (summary.matchcards || []).find((c) => c.typeID === "11");
+  const liveInnings = innings.find((i) => i.isBatting);
+  const scorecardFresh =
+    Boolean(battingCard && liveInnings) &&
+    Math.abs(Number(battingCard.runs || 0) - liveInnings.runs) <= 5;
+
+  const partnershipCard = (summary.matchcards || []).find((c) => c.typeID === "13");
+  const partnerships = scorecardFresh
+    ? (partnershipCard?.playerDetails || []).map((x) => ({
+        wicket: x.partnershipWicketName,
+        runs: Number(x.partnershipRuns || 0),
+        overs: x.partnershipOvers,
+        players: `${x.player1Name} ${x.player1Runs}, ${x.player2Name} ${x.player2Runs}`,
+      }))
+    : [];
 
   // leaders is nested 4 levels deep. Flatten properly.
   const leaders = [];
@@ -270,6 +306,9 @@ function normalizeMatch(summary) {
     innings,
     currentBatters,
     allBatters,
+    bowlers,
+    partnerships,
+    scorecardFresh,
     leaders,
 
     // ESPN lists fixtures it doesn't actually score. Associate and lower-tier
@@ -390,4 +429,61 @@ export function isMaterialChange(prev, next) {
     return "over-mark";
   }
   return null;
+}
+
+/**
+ * Last N deliveries, ball by ball.
+ *
+ * ESPN has no structured shot/length fields — no `ballType: "yorker"` — but the
+ * commentary prose describes length, line, shot and placement in proper cricket
+ * language ("dug in short, controlled pull through midwicket"). That's better
+ * raw material for a digest than any tag set would be.
+ *
+ * Fetched only when a digest is actually being written, never on routine polls.
+ */
+export async function getRecentDeliveries(limit = 12) {
+  if (!locked) return [];
+  const base =
+    `https://site.web.api.espn.com/apis/site/v2/sports/cricket/${locked.leagueId}` +
+    `/playbyplay?event=${locked.eventId}&lang=en&region=in`;
+
+  try {
+    const first = await getJson(base, "ESPN playbyplay");
+    const pages = first.commentary?.pageCount || 1;
+    const last = pages > 1 ? await getJson(`${base}&page=${pages}`, "ESPN playbyplay") : first;
+
+    let items = last.commentary?.items || [];
+    // The final page is usually partial (the over in progress), so reach back a
+    // page when it alone doesn't cover the window we want.
+    if (items.length < limit && pages > 1) {
+      const prev = await getJson(`${base}&page=${pages - 1}`, "ESPN playbyplay");
+      items = [...(prev.commentary?.items || []), ...items];
+    }
+
+    return items
+      .slice(-limit)
+      .map((it) => {
+        // `text` carries the description; `preText` can hold huge pre-match
+        // blurbs and interview transcripts, so it is never included.
+        const desc = String(it.text || "")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const d = it.dismissal || {};
+        return {
+          over: it.over?.overs ?? null,
+          outcome: it.playType?.description || null,
+          runs: it.scoreValue ?? 0,
+          summary: it.shortText || null,          // "AM Fernando to Padikkal, FOUR"
+          description: desc || null,               // length, line, shot, placement
+          wicket: d.dismissal ? d.type || "out" : undefined,
+          score: it.homeScore || null,
+        };
+      })
+      .filter((d) => d.summary || d.description);
+  } catch (err) {
+    // Commentary is a bonus, never a blocker — a digest without it is fine.
+    console.warn("Could not fetch ball-by-ball:", err.message);
+    return [];
+  }
 }
