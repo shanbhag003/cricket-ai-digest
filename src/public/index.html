@@ -453,6 +453,16 @@
       }
       bits.push(`checked ${new Date(s.at).toLocaleTimeString()}`);
       lbSub.textContent = bits.join(' · ');
+
+      // ESPN lists some fixtures without scoring them at all.
+      const noData = s.hasScorecard === false;
+      digestNowBtn.disabled = noData;
+      if (noData) {
+        lbScore.textContent = `${s.teams} — no scorecard`;
+        lbSub.textContent = s.liveDataAvailable
+          ? 'ESPN has not published a scorecard for this match yet.'
+          : 'ESPN lists this fixture but does not provide live scoring for it. Pick another match.';
+      }
     }
 
     digestNowBtn.addEventListener('click', async () => {
@@ -630,6 +640,8 @@
         } else if (payload.type === 'tick') {
           renderSnapshot(payload.snapshot);
           statusBar.textContent = 'No material change since last check.';
+        } else if (payload.type === 'nodata') {
+          statusBar.textContent = `${payload.match}: ${payload.message}`;
         } else if (payload.type === 'tracking') {
           loadMatches(true);
         } else if (payload.type === 'error') {
