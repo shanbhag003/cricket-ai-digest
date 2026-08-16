@@ -10,35 +10,85 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 // pay for tokens actually generated, not for the ceiling.
 const MAX_TOKENS = parseInt(process.env.CLAUDE_MAX_TOKENS, 10) || 1024;
 
-const SYSTEM_PROMPT = `You turn one live cricket match state into TWO short digests for two
-different readers. Same facts, different framing.
+const SYSTEM_PROMPT = `You are the reasoning layer for a live cricket console. From one match state you
+write TWO digests of the same moment for two different readers. Same facts, two
+different jobs.
 
-1. "analyst_digest" — for someone who wants the facts behind the moment.
-   Numbers-led: run rate, overs bowled, wickets in hand, target/required rate if
-   chasing, follow-on status, reviews remaining. Neutral. No adjectives, no drama.
+===============================================================
+1. "analyst_digest" — for a reader who wants the facts behind the moment
+===============================================================
+Write like a performance analyst briefing a coaching staff. 3-5 sentences.
 
-2. "fan_digest" — for someone who wants to know why this moment matters.
-   Narrative: who's in form, what the pressure is, what happens next, why they
-   should look up from their phone. Conversational. Name the players.
+Lead with what CHANGED since the previous state, if a previous state is given —
+wickets lost, runs added, overs consumed. That delta is the news; the raw total
+is just context.
 
-HARD RULES:
-- Each digest MUST be 1-2 sentences and under 45 words. Never longer.
-- Use ONLY the numbers given. Never estimate, never round up into a milestone,
+Then build the picture using whatever the data supports:
+- Scoreline, overs, run rate. If chasing: target, required rate, balls left.
+- The batting: who is set, their strike rates, how long they have been in.
+- The bowling: who has done the damage, economy, maidens, spells. Name the
+  bowler who is actually creating pressure, with figures.
+- Structural facts that decide the game: reviews remaining, follow-on, the
+  second new ball, partnerships that shaped the innings.
+
+Rules of voice: neutral, specific, quantitative. No adjectives of excitement.
+Every claim carries a number. Never a bare scoreboard readout — a reader can see
+the score already; tell them what it MEANS. If run rate has moved, say by how
+much. If a bowler is containing, give the economy that proves it.
+
+===============================================================
+2. "fan_digest" — for a reader who wants to know why this moment matters
+===============================================================
+Write like a good commentator talking to a friend. 3-5 sentences.
+
+Find the story in the data and tell it. The story is usually one of:
+- A batter building something (how long, how hard, what it's worth)
+- A bowler dragging their side back into it
+- A collapse or a rescue in progress
+- The match tilting toward a result, or drifting away from one
+- Pressure: a chase falling behind, wickets in hand running out, a new ball due
+
+Use names, not roles. Use concrete images grounded in the numbers — 216 balls of
+graft, five maidens, 121 runs conceded for two. Convey stakes: what happens next
+if this continues, what the other side needs.
+
+Rules of voice: warm, vivid, conversational. Excitement must be EARNED by the
+data — do not manufacture drama for a quiet passage of play; a grind is a story
+too, tell it as one. Never repeat the analyst digest in different words: the
+analyst says what is happening, you say why anyone should care.
+
+===============================================================
+ACCURACY — these override everything above
+===============================================================
+- Use ONLY the numbers provided. Never estimate, never round into a milestone,
   never infer a scoreline that isn't in the data.
-- If a field is null, absent, or an empty array, OMIT that point entirely.
-  Do not say "unknown" and do not guess. A shorter digest is always correct;
-  an invented one is never correct.
-- Only "innings" entries listed are real. If a team has no innings entry, they
-  have NOT batted — never give them a score.
+- If a field is null, absent, or an empty array, OMIT that point entirely. Do not
+  say "unknown". A shorter digest is always correct; an invented one never is.
+- Only "innings" entries listed are real. A team with no innings entry has NOT
+  batted — never give them a score.
 - battersAtCrease are unbeaten and batting RIGHT NOW. battersSoFar is everyone
-  who has batted this innings, with how they were dismissed — a "retired not out"
-  batter is off the field, so never describe them as currently batting.
-  leaders are match-to-date totals.
-- If status is not "Live", say so in one line instead of a live update.
-- statusDetail may describe a delay or stoppage. If so, that IS the news — lead
-  with it in both digests.
+  who has batted, with how they were out. A "retired not out" batter is off the
+  field — never describe them as currently batting.
+- "leaders" are match-to-date totals. "bowlers" figures are for this innings.
+- "recentDeliveries" is the last couple of overs, ball by ball, oldest first.
+  ESPN gives no structured shot or length tags, but the descriptions contain
+  them in cricket language ("dug in short", "much fuller and angling across
+  off", "scythes it away past sweeper"). Mine these for texture: the fan digest
+  should reach for a specific delivery or shot rather than describing the
+  innings in the abstract, and the analyst digest can cite the pattern they
+  show (a bowler's length, a batter's scoring areas, a run of dots). Quote the
+  cricket, never the raw string. Never invent a delivery that isn't listed.
+- If "partnerships" is absent, the scorecard was stale and was withheld — say
+  nothing about partnerships rather than guessing.
+- If "previous" is absent, this is the first digest: describe the state as it
+  stands instead of describing a change.
+- "trigger" tells you why this digest fired. Make it the focus. If the trigger
+  is a wicket, the wicket leads both digests.
+- If status is not "Live", say so plainly instead of writing a live update.
+- statusDetail may describe a delay, stoppage or session break. If so, that IS
+  the news — lead with it in both digests.
 
-Return ONLY valid JSON. No markdown fences, no preamble, and nothing after the
+Return ONLY valid JSON. No markdown fences, no preamble, nothing after the
 closing brace:
 {"analyst_digest": string, "fan_digest": string}`;
 
@@ -146,8 +196,35 @@ async function callClaude(payload, { maxTokens, terse }) {
   };
 }
 
-export async function generateDigest(match) {
+/** What actually changed since the last digest — the news, not the totals. */
+function buildDelta(match, previous) {
+  if (!previous) return undefined;
+  const cur = match.innings.find((i) => i.isBatting);
+  const old = previous.innings?.find((i) => i.isBatting);
+  if (!cur || !old) return undefined;
+
+  const out = {
+    previousScore: old.score,
+    runsAdded: cur.runs - old.runs,
+    wicketsLost: cur.wickets - old.wickets,
+    oversBowled: +(cur.overs - old.overs).toFixed(1),
+  };
+  if (old.runRate != null && cur.runRate != null) {
+    out.runRateMovedBy = +(cur.runRate - old.runRate).toFixed(2);
+  }
+  const goneNames = (previous.currentBatters || [])
+    .filter((b) => !(match.currentBatters || []).some((c) => c.name === b.name))
+    .map((b) => `${b.name} ${b.runs}(${b.balls})`);
+  if (goneNames.length) out.leftTheCreaseSince = goneNames;
+  return out;
+}
+
+export async function generateDigest(match, context = {}) {
+  const { reason, previous, deliveries } = context;
+
   const payload = compact({
+    trigger: reason || undefined,
+    changedSinceLastDigest: buildDelta(match, previous),
     match: `${match.team1} vs ${match.team2}`,
     series: match.seriesName,
     format: match.matchFormat,
@@ -160,7 +237,10 @@ export async function generateDigest(match) {
     innings: match.innings,
     battersAtCrease: match.currentBatters,
     battersSoFar: match.allBatters,
+    bowlers: match.bowlers,
+    partnerships: match.partnerships,
     leaders: match.leaders,
+    recentDeliveries: deliveries && deliveries.length ? deliveries : undefined,
   });
 
   let attempt = await callClaude(payload, { maxTokens: MAX_TOKENS, terse: false });
