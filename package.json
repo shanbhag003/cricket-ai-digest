@@ -1,0 +1,19 @@
+{
+  "name": "cricket-ai-digest",
+  "version": "1.0.0",
+  "description": "Polls live cricket match data (via CricketData.org) and uses Claude to generate stakeholder-friendly digests, delivered to Slack and a live web dashboard.",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@anthropic-ai/sdk": "^0.32.0",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2",
+    "node-cron": "^3.0.3",
+    "ws": "^8.18.0"
+  }
+}
