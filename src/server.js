@@ -15,7 +15,7 @@ import {
 } from "./espnClient.js";
 import { listMatches } from "./matchDiscovery.js";
 import { generateDigest } from "./digestGenerator.js";
-import { postToSlack } from "./slackNotifier.js";
+import { postToSlack, sendSlackTest } from "./slackNotifier.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -105,6 +105,61 @@ function broadcast(payload) {
   }
 }
 
+/** Compact snapshot pushed to the console every poll, so it never looks dead. */
+function liveSnapshot(match) {
+  const bat = match.innings.find((i) => i.isBatting);
+  return {
+    teams: `${match.team1} v ${match.team2}`,
+    score: bat ? bat.score : match.status,
+    runRate: bat?.runRate ?? null,
+    status: match.status,
+    statusDetail: match.statusDetail,
+    session: match.session,
+    venue: match.venue,
+    format: match.matchFormat,
+    batters: match.currentBatters,
+    at: new Date().toISOString(),
+  };
+}
+
+/** Generate a digest, store it, push it to the console. Shared by the poller
+ *  and the manual "Digest now" button. */
+async function produceDigest(match, reason) {
+  const score = match.innings.find((i) => i.isBatting)?.score || match.status;
+  try {
+    const digest = await generateDigest(match);
+    const entry = {
+      matchId: match.matchId,
+      teams: `${match.team1} vs ${match.team2}`,
+      venue: match.venue,
+      status: match.status,
+      format: match.matchFormat,
+      reason,
+      score,
+      fingerprint: match.fingerprint, // enables the dedupe check
+      analystDigest: digest.analyst_digest,
+      fanDigest: digest.fan_digest,
+      generatedAt: new Date().toISOString(),
+    };
+
+    digestHistory.unshift(entry);
+    if (digestHistory.length > MAX_HISTORY) digestHistory.pop();
+
+    stats.digestsGenerated++;
+    saveState();
+    broadcast({ type: "digest", entry });
+    await postToSlack(match, digest, reason);
+    console.log(`[digest #${stats.digestsGenerated}] ${reason} · ${entry.teams} ${score}`);
+    return { ok: true, entry };
+  } catch (err) {
+    stats.digestErrors++;
+    stats.lastError = `${new Date().toISOString()} DIGEST: ${err.message}`;
+    console.error(`Digest failed for ${match.matchId}:`, err.message);
+    broadcast({ type: "error", scope: "digest", message: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+
 async function pollAndDigest() {
   stats.polls++;
   stats.lastPollAt = new Date().toISOString();
@@ -139,14 +194,15 @@ async function pollAndDigest() {
       console.log(
         `[baseline] ${stats.lastMatchSeen} — ${getFormatRules(match).label}, no digest (cold start)`
       );
-      broadcast({ type: "baseline", match: stats.lastMatchSeen, at: stats.lastPollAt });
+      broadcast({ type: "baseline", match: stats.lastMatchSeen, snapshot: liveSnapshot(match) });
       continue;
     }
 
-    if (!isMaterialChange(prev, match)) {
+    const reason = isMaterialChange(prev, match);
+    if (!reason) {
       lastMatchState.set(match.matchId, match); // advance baseline
       saveState();
-      broadcast({ type: "tick", match: stats.lastMatchSeen, at: stats.lastPollAt });
+      broadcast({ type: "tick", match: stats.lastMatchSeen, snapshot: liveSnapshot(match) });
       continue;
     }
 
@@ -171,36 +227,7 @@ async function pollAndDigest() {
     stats.changesSeen++;
     lastMatchState.set(match.matchId, match);
     lastDigestAt.set(match.matchId, Date.now());
-
-    try {
-      const digest = await generateDigest(match);
-      const entry = {
-        matchId: match.matchId,
-        teams: `${match.team1} vs ${match.team2}`,
-        venue: match.venue,
-        status: match.status,
-        format: match.matchFormat,
-        score,
-        fingerprint: match.fingerprint, // enables the dedupe check above
-        analystDigest: digest.analyst_digest,
-        fanDigest: digest.fan_digest,
-        generatedAt: new Date().toISOString(),
-      };
-
-      digestHistory.unshift(entry);
-      if (digestHistory.length > MAX_HISTORY) digestHistory.pop();
-
-      stats.digestsGenerated++;
-      saveState();
-      broadcast({ type: "digest", entry });
-      await postToSlack(match, digest);
-      console.log(`[digest #${stats.digestsGenerated}] ${entry.teams} ${entry.score}`);
-    } catch (err) {
-      stats.digestErrors++;
-      stats.lastError = `${new Date().toISOString()} DIGEST: ${err.message}`;
-      console.error(`Digest failed for ${match.matchId}:`, err.message);
-      broadcast({ type: "error", scope: "digest", message: err.message });
-    }
+    await produceDigest(match, reason);
   }
 }
 
@@ -238,6 +265,31 @@ app.post("/api/track", async (req, res) => {
   res.json({ ok: true, tracking: getTrackedMatch() });
 
   pollAndDigest().catch((e) => console.error("post-switch poll failed:", e.message));
+});
+
+// Fire a sample Slack message to verify the webhook end to end.
+app.get("/api/test-slack", async (req, res) => {
+  const out = await sendSlackTest();
+  res.status(out.ok ? 200 : 500).json(out);
+});
+
+// Manual "Digest now" — bypasses the materiality gate. The console is the only
+// consumer, so an on-demand brief is exactly what you want when you open it
+// mid-match and the score hasn't moved yet.
+app.post("/api/digest-now", async (req, res) => {
+  try {
+    const matches = await getLiveMatches({ force: true });
+    if (matches.length === 0) {
+      return res.status(404).json({ error: "No match currently tracked." });
+    }
+    const match = matches[0];
+    lastMatchState.set(match.matchId, match);
+    lastDigestAt.set(match.matchId, Date.now());
+    const out = await produceDigest(match, "manual");
+    res.status(out.ok ? 200 : 500).json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/api/history", (req, res) => res.json({ history: digestHistory }));
