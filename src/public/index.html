@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Match Feed — RAID/OPS Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@500;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0d10;
+    --panel: #10151a;
+    --panel-border: #1e2830;
+    --amber: #ff9500;
+    --cyan: #3fd8e0;
+    --text-primary: #e8edf0;
+    --text-dim: #6b7a85;
+    --ops-color: #3fd8e0;
+    --partner-color: #ff9500;
+    --live-red: #ff3b3b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: 'Archivo', sans-serif;
+    min-height: 100vh;
+    padding: 24px 20px 60px;
+  }
+
+  .console {
+    max-width: 920px;
+    margin: 0 auto;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+  }
+
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    margin-top: 4px;
+  }
+
+  .live-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+
+  .live-dot.active {
+    background: var(--live-red);
+    box-shadow: 0 0 0 0 rgba(255, 59, 59, 0.6);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255, 59, 59, 0.5); }
+    70% { box-shadow: 0 0 0 8px rgba(255, 59, 59, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 59, 59, 0); }
+  }
+
+  #status-bar {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    padding: 10px 14px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--cyan);
+  }
+
+  .feed { display: flex; flex-direction: column; gap: 14px; }
+
+  .entry {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    overflow: hidden;
+    animation: slideIn 0.3s ease-out;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .entry-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .teams {
+    font-weight: 600;
+    font-size: 15px;
+  }
+
+  .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: right;
+  }
+
+  .digest-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  @media (max-width: 640px) {
+    .digest-row { grid-template-columns: 1fr; }
+  }
+
+  .digest-cell {
+    padding: 14px 16px;
+  }
+
+  .digest-cell.ops { border-right: 1px solid var(--panel-border); }
+
+  @media (max-width: 640px) {
+    .digest-cell.ops { border-right: none; border-bottom: 1px solid var(--panel-border); }
+  }
+
+  .digest-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .digest-cell.ops .digest-label { color: var(--ops-color); }
+  .digest-cell.partner .digest-label { color: var(--partner-color); }
+
+  .digest-text {
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--text-primary);
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+  }
+
+  footer {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid var(--panel-border);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+  <div class="console">
+    <header>
+      <div>
+        <div class="eyebrow">Live Match Intelligence</div>
+        <h1>Cricket Digest Console</h1>
+      </div>
+      <div class="live-pill">
+        <div class="live-dot" id="live-dot"></div>
+        <span id="conn-status">Connecting…</span>
+      </div>
+    </header>
+
+    <div id="status-bar">Waiting for first poll…</div>
+
+    <div class="feed" id="feed">
+      <div class="empty-state">No digests generated yet. Once a live match updates, entries will appear here.</div>
+    </div>
+
+    <footer>
+      Source: CricketData.org → Claude (dual-persona digest) → Ops / Broadcast Partner views · Polls every few minutes
+    </footer>
+  </div>
+
+  <script>
+    const feed = document.getElementById('feed');
+    const statusBar = document.getElementById('status-bar');
+    const liveDot = document.getElementById('live-dot');
+    const connStatus = document.getElementById('conn-status');
+
+    let hasEntries = false;
+
+    function renderEntry(entry) {
+      if (!hasEntries) {
+        feed.innerHTML = '';
+        hasEntries = true;
+      }
+
+      const el = document.createElement('div');
+      el.className = 'entry';
+      el.innerHTML = `
+        <div class="entry-head">
+          <div class="teams">${entry.teams}</div>
+          <div class="meta">${entry.venue}<br>${new Date(entry.generatedAt).toLocaleTimeString()}</div>
+        </div>
+        <div class="digest-row">
+          <div class="digest-cell ops">
+            <div class="digest-label">Ops Digest</div>
+            <div class="digest-text">${entry.opsDigest}</div>
+          </div>
+          <div class="digest-cell partner">
+            <div class="digest-label">Broadcast Partner Digest</div>
+            <div class="digest-text">${entry.partnerDigest}</div>
+          </div>
+        </div>
+      `;
+      feed.prepend(el);
+    }
+
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}`);
+
+      ws.onopen = () => {
+        connStatus.textContent = 'Connected';
+        liveDot.classList.add('active');
+      };
+
+      ws.onclose = () => {
+        connStatus.textContent = 'Disconnected — retrying…';
+        liveDot.classList.remove('active');
+        setTimeout(connect, 3000);
+      };
+
+      ws.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+
+        if (payload.type === 'history') {
+          payload.history.slice().reverse().forEach(renderEntry);
+          if (payload.history.length === 0) {
+            statusBar.textContent = 'No digests yet. Waiting for a live match to update.';
+          }
+        } else if (payload.type === 'digest') {
+          renderEntry(payload.entry);
+          statusBar.textContent = `Last update: ${payload.entry.teams} at ${new Date(payload.entry.generatedAt).toLocaleTimeString()}`;
+        } else if (payload.type === 'status') {
+          statusBar.textContent = `${payload.message} (checked ${new Date(payload.checkedAt).toLocaleTimeString()})`;
+        }
+      };
+    }
+
+    connect();
+
+    // Also load history via REST on first paint, in case WS takes a moment
+    fetch('/api/history').then(r => r.json()).then(data => {
+      if (!hasEntries && data.history.length > 0) {
+        data.history.slice().reverse().forEach(renderEntry);
+      }
+    }).catch(() => {});
+  </script>
+</body>
+</html>
