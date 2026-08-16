@@ -103,6 +103,22 @@ async function fetchSummary() {
 }
 
 /**
+ * Point the poller at a specific match, chosen at runtime (e.g. from the
+ * dashboard dropdown) instead of via TEAM_FILTER. Resets the cheap fingerprint
+ * so the next poll definitely fetches fresh state for the new match.
+ */
+export function setTrackedMatch({ leagueId, eventId, leagueName }) {
+  locked = { leagueId: String(leagueId), eventId: String(eventId), leagueName };
+  lastCheapFingerprint = null;
+  console.log(`Tracking switched to league ${leagueId}, event ${eventId}`);
+  return locked;
+}
+
+export function getTrackedMatch() {
+  return locked;
+}
+
+/**
  * Returns [] when nothing changed since last call, so the caller never burns
  * a Claude call on a no-op. Pass { force: true } to bypass (e.g. on startup).
  */
@@ -206,7 +222,10 @@ function normalizeMatch(summary) {
   return {
     matchId: String(header.id || comp.id),
     seriesName: header.league?.name || (header.leagues || [])[0]?.name || null,
-    matchFormat: comp.class?.description || noteOf("matchnumber") || null,
+    matchFormat: comp.class?.generalClassCard || comp.class?.name || noteOf("matchnumber") || null,
+    // eventType is ESPN's clean discriminator: "Test" | "T20" | "ODI".
+    // limitedOvers is the fallback when eventType is missing.
+    formatKey: detectFormat(comp),
     team1: competitors[0]?.team?.displayName || "Team A",
     team2: competitors[1]?.team?.displayName || "Team B",
 
@@ -235,6 +254,75 @@ function normalizeMatch(summary) {
  * Should we spend a Claude call on this change?
  * Runs ticking up by 2 is not news. A wicket is.
  */
+// ---------------------------------------------------------------------------
+// Format-aware materiality
+//
+// What counts as "worth a Claude call" depends entirely on the format. Fifty
+// runs is an hour's grind in a Test and five overs in a T20. Over 10 is a
+// routine marker in a Test and the halfway point of a T20 innings.
+//
+// keyOvers are the moments that matter in that format specifically, and they
+// don't fall on a regular step: the powerplay ends at 6 in a T20, the death
+// begins at 16, ODI fielding restrictions change at 10 and 40, and the second
+// new ball is available at 80 in a Test.
+// ---------------------------------------------------------------------------
+
+export const FORMAT_RULES = {
+  test: {
+    label: "Test / first-class",
+    teamRunStep: 50,
+    overStep: 10,
+    batterRunStep: 50,
+    keyOvers: [80],            // second new ball available
+    minGapSeconds: 180,
+  },
+  odi: {
+    label: "ODI / List A",
+    teamRunStep: 50,
+    overStep: 10,
+    batterRunStep: 50,
+    keyOvers: [10, 40],        // powerplay end, death overs begin
+    minGapSeconds: 120,
+  },
+  t20: {
+    label: "T20",
+    teamRunStep: 50,
+    overStep: 5,
+    batterRunStep: 50,
+    keyOvers: [6, 16],         // powerplay end, death overs begin
+    minGapSeconds: 90,
+  },
+};
+
+/** ESPN competition object -> "test" | "odi" | "t20" */
+function detectFormat(comp) {
+  const t = (comp?.class?.eventType || "").toUpperCase();
+  if (t === "TEST") return "test";
+  if (t === "T20") return "t20";
+  if (t === "ODI") return "odi";
+
+  const card = (comp?.class?.generalClassCard || comp?.class?.name || "").toLowerCase();
+  if (card.includes("test") || card.includes("first-class")) return "test";
+  if (card.includes("t20") || card.includes("twenty20") || card.includes("hundred")) return "t20";
+  if (card.includes("od") || card.includes("list a") || card.includes("one-day")) return "odi";
+
+  // Last resort: a match that isn't limited-overs is a multi-day game.
+  return comp?.limitedOvers === false ? "test" : "odi";
+}
+
+export function getFormatRules(match) {
+  return FORMAT_RULES[match?.formatKey] || FORMAT_RULES.odi;
+}
+
+/** Did we pass one of the format's landmark overs since last poll? */
+function crossedKeyOver(prevOvers, curOvers, keyOvers) {
+  return keyOvers.some((k) => prevOvers < k && curOvers >= k);
+}
+
+/**
+ * Should we spend a Claude call on this change?
+ * Runs ticking up by 2 is not news. A wicket is.
+ */
 export function isMaterialChange(prev, next) {
   if (!prev) return true;
   if (prev.status !== next.status) return true;
@@ -245,16 +333,22 @@ export function isMaterialChange(prev, next) {
   const old = prev.innings.find((i) => i.isBatting);
   if (!cur || !old) return true;
 
-  if (cur.wickets !== old.wickets) return true;                              // wicket
-  if (cur.followOn !== old.followOn) return true;                            // follow-on enforced
-  if (cur.target !== old.target) return true;                                // chase target set
-  if (Math.floor(cur.runs / 50) !== Math.floor(old.runs / 50)) return true;  // team 50
-  if (Math.floor(cur.overs / 10) !== Math.floor(old.overs / 10)) return true; // 10 overs
+  const r = getFormatRules(next);
+
+  if (cur.wickets !== old.wickets) return true;   // wicket
+  if (cur.followOn !== old.followOn) return true; // follow-on enforced
+  if (cur.target !== old.target) return true;     // chase target set
+
+  if (Math.floor(cur.runs / r.teamRunStep) !== Math.floor(old.runs / r.teamRunStep)) return true;
+  if (Math.floor(cur.overs / r.overStep) !== Math.floor(old.overs / r.overStep)) return true;
+  if (crossedKeyOver(old.overs, cur.overs, r.keyOvers)) return true;
 
   for (const b of next.currentBatters) {
     const before = prev.currentBatters.find((p) => p.name === b.name);
-    if (!before) return true;
-    if (Math.floor(b.runs / 50) !== Math.floor(before.runs / 50)) return true; // 50/100
+    if (!before) return true; // new batter at the crease
+    if (Math.floor(b.runs / r.batterRunStep) !== Math.floor(before.runs / r.batterRunStep)) {
+      return true; // fifty / century
+    }
   }
   return false;
 }
