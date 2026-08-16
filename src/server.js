@@ -15,7 +15,6 @@ import {
 } from "./espnClient.js";
 import { listMatches } from "./matchDiscovery.js";
 import { generateDigest } from "./digestGenerator.js";
-import { postToSlack, sendSlackTest } from "./slackNotifier.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,7 +147,6 @@ async function produceDigest(match, reason) {
     stats.digestsGenerated++;
     saveState();
     broadcast({ type: "digest", entry });
-    await postToSlack(match, digest, reason);
     console.log(`[digest #${stats.digestsGenerated}] ${reason} · ${entry.teams} ${score}`);
     return { ok: true, entry };
   } catch (err) {
@@ -265,31 +263,6 @@ app.post("/api/track", async (req, res) => {
   res.json({ ok: true, tracking: getTrackedMatch() });
 
   pollAndDigest().catch((e) => console.error("post-switch poll failed:", e.message));
-});
-
-// Fire a sample Slack message to verify the webhook end to end.
-app.get("/api/test-slack", async (req, res) => {
-  const out = await sendSlackTest();
-  res.status(out.ok ? 200 : 500).json(out);
-});
-
-// Manual "Digest now" — bypasses the materiality gate. The console is the only
-// consumer, so an on-demand brief is exactly what you want when you open it
-// mid-match and the score hasn't moved yet.
-app.post("/api/digest-now", async (req, res) => {
-  try {
-    const matches = await getLiveMatches({ force: true });
-    if (matches.length === 0) {
-      return res.status(404).json({ error: "No match currently tracked." });
-    }
-    const match = matches[0];
-    lastMatchState.set(match.matchId, match);
-    lastDigestAt.set(match.matchId, Date.now());
-    const out = await produceDigest(match, "manual");
-    res.status(out.ok ? 200 : 500).json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.get("/api/history", (req, res) => res.json({ history: digestHistory }));
