@@ -196,6 +196,9 @@
     .picker-row button { flex: 0 0 auto; }
     .picker { padding: 12px; }
     #status-bar { font-size: 11.5px; padding: 10px 12px; }
+    .livebar { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; }
+    .livebar-score { font-size: 16px; }
+    #digest-now { width: 100%; min-height: 48px; font-size: 16px; }
   }
 
   @media (max-width: 380px) {
@@ -288,6 +291,51 @@
 
   .picker button[disabled] { opacity: 0.5; cursor: default; }
 
+  .livebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+  }
+
+  .livebar-main { min-width: 0; }
+
+  .livebar-score {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+
+  .livebar-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+  }
+
+  #digest-now {
+    flex: 0 0 auto;
+    background: var(--bg);
+    color: var(--amber);
+    border: 1px solid var(--amber);
+    border-radius: 3px;
+    padding: 10px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  #digest-now:hover:not([disabled]) { background: var(--amber); color: var(--bg); }
+  #digest-now[disabled] { opacity: 0.45; cursor: default; }
+
   .picker-note {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10.5px;
@@ -338,6 +386,14 @@
       <div class="picker-note" id="picker-note"></div>
     </div>
 
+    <div class="livebar" id="livebar">
+      <div class="livebar-main">
+        <div class="livebar-score" id="lb-score">—</div>
+        <div class="livebar-sub" id="lb-sub">Waiting for first poll…</div>
+      </div>
+      <button id="digest-now" type="button">Digest now</button>
+    </div>
+
     <div id="status-bar">Waiting for first poll…</div>
 
     <div class="feed" id="feed">
@@ -356,6 +412,42 @@
     const connStatus = document.getElementById('conn-status');
 
     let hasEntries = false;
+
+    const lbScore = document.getElementById('lb-score');
+    const lbSub = document.getElementById('lb-sub');
+    const digestNowBtn = document.getElementById('digest-now');
+
+    function renderSnapshot(s) {
+      if (!s) return;
+      lbScore.textContent = `${s.teams} — ${s.score}`;
+      const bits = [];
+      if (s.format) bits.push(s.format);
+      if (s.runRate != null) bits.push(`RR ${s.runRate}`);
+      if (s.session) bits.push(s.session);
+      if (s.statusDetail) bits.push(s.statusDetail);
+      if (s.batters && s.batters.length) {
+        bits.push(s.batters.map(b => `${b.name} ${b.runs}(${b.balls})`).join(', '));
+      }
+      bits.push(`checked ${new Date(s.at).toLocaleTimeString()}`);
+      lbSub.textContent = bits.join(' · ');
+    }
+
+    digestNowBtn.addEventListener('click', async () => {
+      digestNowBtn.disabled = true;
+      const original = digestNowBtn.textContent;
+      digestNowBtn.textContent = 'Thinking…';
+      try {
+        const res = await fetch('/api/digest-now', { method: 'POST' });
+        const out = await res.json();
+        if (!res.ok || out.error) throw new Error(out.error || `HTTP ${res.status}`);
+        // the digest also arrives over the WebSocket; nothing more to do here
+      } catch (err) {
+        statusBar.textContent = `Could not generate digest: ${err.message}`;
+      } finally {
+        digestNowBtn.textContent = original;
+        digestNowBtn.disabled = false;
+      }
+    });
 
     function renderEntry(entry) {
       if (!hasEntries) {
@@ -516,9 +608,11 @@
         } else if (payload.type === 'status') {
           statusBar.textContent = `${payload.message} (checked ${new Date(payload.checkedAt).toLocaleTimeString()})`;
         } else if (payload.type === 'baseline') {
-          statusBar.textContent = `Baseline set: ${payload.match} — no digest (nothing has changed yet).`;
+          renderSnapshot(payload.snapshot);
+          statusBar.textContent = 'Tracking started. Next digest arrives when something material happens — or hit "Digest now".';
         } else if (payload.type === 'tick') {
-          statusBar.textContent = `${payload.match} · checked ${new Date(payload.at).toLocaleTimeString()} · no material change`;
+          renderSnapshot(payload.snapshot);
+          statusBar.textContent = 'No material change since last check.';
         } else if (payload.type === 'tracking') {
           loadMatches(true);
         } else if (payload.type === 'error') {
