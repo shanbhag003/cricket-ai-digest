@@ -11,7 +11,14 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
 // Two digests of 60-110 words each is ~300 output tokens. 2048 leaves room for
 // that plus any thinking blocks the model emits, which share the same budget.
 // You are billed for tokens generated, not for the ceiling, so headroom is free.
-const MAX_TOKENS = parseInt(process.env.CLAUDE_MAX_TOKENS, 10) || 2048;
+const MAX_TOKENS = parseInt(process.env.CLAUDE_MAX_TOKENS, 10) || 4096;
+
+// Extended thinking shares the max_tokens budget with the visible reply. On a
+// long prompt the model can spend the ENTIRE budget thinking and return
+// stop_reason=max_tokens with no text block at all. This task needs no
+// deliberation — it's "turn JSON into two paragraphs" — so thinking is turned
+// off. Set CLAUDE_THINKING=default to leave the model's own default in place.
+const DISABLE_THINKING = (process.env.CLAUDE_THINKING || "disabled") === "disabled";
 
 const SYSTEM_PROMPT = `You are the reasoning layer for a live cricket console. From one match state you
 write TWO digests of the same moment for two different readers.
@@ -167,6 +174,7 @@ export function parseDigest(raw) {
 // before the JSON. But the API rejects assistant prefill when extended thinking
 // is enabled, so if that's rejected we transparently fall back to no prefill.
 let usePrefill = true;
+let sendThinkingParam = DISABLE_THINKING; // dropped if the API rejects it
 
 async function callClaude(payload, { maxTokens, terse }) {
   const userContent =
@@ -177,33 +185,45 @@ async function callClaude(payload, { maxTokens, terse }) {
         `Output only the JSON object.`
       : "");
 
-  const send = async (prefill) => {
+  const send = async (prefill, withThinkingParam) => {
     const messages = [{ role: "user", content: userContent }];
     if (prefill) messages.push({ role: "assistant", content: "{" });
-    return anthropic.messages.create({
+    const body = {
       model: MODEL,
       max_tokens: maxTokens,
       system: SYSTEM_PROMPT,
       messages,
-    });
+    };
+    if (withThinkingParam) body.thinking = { type: "disabled" };
+    return anthropic.messages.create(body);
   };
 
   let res;
   let prefilled = usePrefill;
-  try {
-    res = await send(prefilled);
-  } catch (err) {
-    const msg = String(err?.message || "");
-    const prefillRejected =
-      /thinking/i.test(msg) ||
-      /final assistant/i.test(msg) ||
-      /assistant.*prefill/i.test(msg) ||
-      /prefill/i.test(msg);
-    if (!prefilled || !prefillRejected) throw err;
-    console.warn("Assistant prefill rejected — falling back without it.");
-    usePrefill = false; // remember for the rest of the process
-    prefilled = false;
-    res = await send(false);
+  let thinkingParam = sendThinkingParam;
+
+  for (let tries = 0; ; tries++) {
+    try {
+      res = await send(prefilled, thinkingParam);
+      break;
+    } catch (err) {
+      const msg = String(err?.message || "");
+      // The thinking parameter may not be accepted by this model or SDK.
+      if (thinkingParam && /thinking/i.test(msg)) {
+        console.warn("thinking parameter rejected — dropping it.");
+        sendThinkingParam = false;
+        thinkingParam = false;
+        continue;
+      }
+      // Assistant prefill is rejected when thinking is enabled.
+      if (prefilled && /(thinking|final assistant|prefill)/i.test(msg)) {
+        console.warn("Assistant prefill rejected — falling back without it.");
+        usePrefill = false;
+        prefilled = false;
+        continue;
+      }
+      throw err;
+    }
   }
 
   const text = res.content.find((b) => b.type === "text")?.text;
@@ -266,36 +286,34 @@ export async function generateDigest(match, context = {}) {
 
   let attempt = await callClaude(payload, { maxTokens: MAX_TOKENS, terse: false });
 
-  if (attempt.text) {
-    const parsed = parseDigest(attempt.text);
-    if (parsed && attempt.stopReason !== "max_tokens") return parsed;
+  const parsed = attempt.text ? parseDigest(attempt.text) : null;
+  if (parsed && attempt.stopReason !== "max_tokens") return parsed;
 
-    // Truncated. Retry once, asking for something shorter and allowing more room.
-    if (attempt.stopReason === "max_tokens") {
-      console.warn(
-        `Digest hit max_tokens (${MAX_TOKENS}) — retrying with a shorter target.` +
-          (attempt.hadThinking
-            ? " Response included thinking blocks, which consume the same budget;" +
-              " raise CLAUDE_MAX_TOKENS or use claude-haiku-4-5-20251001."
-            : "")
-      );
-      const retry = await callClaude(payload, {
-        maxTokens: MAX_TOKENS * 2,
-        terse: true,
-      });
-      const retryParsed = retry.text ? parseDigest(retry.text) : null;
-      if (retryParsed) return retryParsed;
-
-      // Last resort: use whatever survived from either attempt.
-      if (parsed) {
-        console.warn("Retry failed too — using the salvaged first response.");
-        return parsed;
-      }
-      throw new Error(
-        `Claude's reply was cut off at ${MAX_TOKENS} tokens twice. ` +
-          `Raise CLAUDE_MAX_TOKENS.`
-      );
+  // Budget exhausted. This fires even when NO text came back — which is the
+  // worst case, and previously fell through to a bare error with no retry.
+  if (attempt.stopReason === "max_tokens") {
+    console.warn(
+      `Digest hit max_tokens (${MAX_TOKENS}); text block ` +
+        `${attempt.text ? "truncated" : "MISSING ENTIRELY"}` +
+        (attempt.hadThinking
+          ? ". Response contained thinking blocks, which consume the same budget" +
+            " — set CLAUDE_THINKING=disabled or use claude-haiku-4-5-20251001"
+          : "") +
+        `. Retrying with ${MAX_TOKENS * 2}.`
+    );
+    const retry = await callClaude(payload, { maxTokens: MAX_TOKENS * 2, terse: true });
+    const retryParsed = retry.text ? parseDigest(retry.text) : null;
+    if (retryParsed) return retryParsed;
+    if (parsed) {
+      console.warn("Retry failed too — using the salvaged first response.");
+      return parsed;
     }
+    throw new Error(
+      `Claude's reply was cut off at ${MAX_TOKENS} then ${MAX_TOKENS * 2} tokens` +
+        `${attempt.hadThinking ? " (thinking blocks consumed the budget)" : ""}. ` +
+        `Raise CLAUDE_MAX_TOKENS, set CLAUDE_THINKING=disabled, or switch to ` +
+        `claude-haiku-4-5-20251001.`
+    );
   }
 
   throw new Error(
