@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@500;600;800&display=swap" rel="stylesheet">
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0a0d10;
     --panel: #10151a;
     --panel-border: #1e2830;
@@ -22,12 +23,25 @@
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  html {
+    /* Android Chrome inflates text in wide blocks ("font boosting") unless
+       this is set. iOS inflates on rotate. Both are fixed by the same line. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
   body {
     background: var(--bg);
     color: var(--text-primary);
     font-family: 'Archivo', sans-serif;
+    /* 100vh includes the area behind the collapsing mobile address bar and
+       causes a scroll jump on both platforms. dvh tracks the real viewport. */
     min-height: 100vh;
+    min-height: 100dvh;
     padding: 24px 20px 60px;
+    /* stop an accidental downward swipe from reloading the page and
+       dropping the WebSocket */
+    overscroll-behavior-y: contain;
   }
 
   .console {
@@ -124,6 +138,8 @@
   .teams {
     font-weight: 600;
     font-size: 15px;
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
 
   .meta {
@@ -139,7 +155,53 @@
   }
 
   @media (max-width: 640px) {
+    body { padding: 14px 12px 40px; }
+
+    /* single column digests */
     .digest-row { grid-template-columns: 1fr; }
+    .digest-cell.analyst {
+      border-right: none;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    /* stack the page header instead of squeezing it */
+    header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    h1 { font-size: 21px; }
+
+    /* stack match name above venue/time so neither gets crushed */
+    .entry-head {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+      padding: 12px 14px;
+    }
+    .meta { text-align: left; }
+
+    .digest-cell { padding: 12px 14px; }
+
+    /* 16px is the threshold below which iOS Safari force-zooms on focus.
+       Do not lower these. */
+    .picker select,
+    .picker button {
+      font-size: 16px;
+      padding: 12px;
+      min-height: 48px;
+    }
+    .picker-row { gap: 6px; }
+    .picker-row select { flex: 1 1 auto; min-width: 0; }
+    .picker-row button { flex: 0 0 auto; }
+    .picker { padding: 12px; }
+    #status-bar { font-size: 11.5px; padding: 10px 12px; }
+  }
+
+  @media (max-width: 380px) {
+    h1 { font-size: 19px; }
+    .picker-row select { flex-basis: 100%; }
+    .picker-row button { width: 100%; }
   }
 
   .digest-cell {
@@ -147,10 +209,6 @@
   }
 
   .digest-cell.analyst { border-right: 1px solid var(--panel-border); }
-
-  @media (max-width: 640px) {
-    .digest-cell.analyst { border-right: none; border-bottom: 1px solid var(--panel-border); }
-  }
 
   .digest-label {
     font-family: 'JetBrains Mono', monospace;
@@ -175,6 +233,7 @@
     font-size: 13.5px;
     line-height: 1.5;
     color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
 
   .empty-state {
@@ -217,6 +276,13 @@
   }
 
   #match-select { width: 100%; }
+
+  /* Android Chrome renders <option> in a native popup. Without these it can
+     inherit the near-white page text onto a white system background. */
+  .picker select option {
+    background-color: #10151a;
+    color: #e8edf0;
+  }
 
   .picker button:hover { border-color: var(--amber); color: var(--amber); }
 
@@ -344,12 +410,22 @@
         return;
       }
 
+      // Native <select> pickers on Android truncate long options with an
+      // ellipsis, so drop the series name and level on narrow screens.
+      const narrow = window.innerWidth < 640;
+
       matchSelect.innerHTML = visible.map(m => {
-        const badge = m.state === 'in' ? '● LIVE' : m.state === 'post' ? '· done' : '○ ' + m.startIST;
+        const badge = m.state === 'in' ? '● LIVE'
+          : m.state === 'post' ? '· done'
+          : '○ ' + (narrow ? m.startIST.replace(' IST', '') : m.startIST);
         const sel = tracking && tracking.eventId === m.eventId ? ' selected' : '';
-        return `<option value="${m.leagueId}|${m.eventId}"${sel}>`
-          + `${badge}  ·  ${m.matchName}  ·  ${m.format} ${m.level === 'International' ? 'Intl' : 'Dom'}`
-          + `  ·  ${m.seriesName}</option>`;
+
+        const name = narrow && m.shortName ? m.shortName : m.matchName;
+        const tail = narrow
+          ? `  ·  ${m.format}`
+          : `  ·  ${m.format} ${m.level === 'International' ? 'Intl' : 'Dom'}  ·  ${m.seriesName}`;
+
+        return `<option value="${m.leagueId}|${m.eventId}"${sel}>${badge}  ·  ${name}${tail}</option>`;
       }).join('');
     }
 
@@ -398,12 +474,22 @@
     filterState.addEventListener('change', renderMatchOptions);
     refreshBtn.addEventListener('click', () => loadMatches(true));
 
+    // re-render labels when the phone rotates across the breakpoint
+    let lastNarrow = window.innerWidth < 640;
+    window.addEventListener('resize', () => {
+      const nowNarrow = window.innerWidth < 640;
+      if (nowNarrow !== lastNarrow) { lastNarrow = nowNarrow; renderMatchOptions(); }
+    });
+
     loadMatches(false);
     setInterval(() => loadMatches(false), 120000);
+
+    let socket = null;
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${protocol}//${window.location.host}`);
+      socket = ws;
 
       ws.onopen = () => {
         connStatus.textContent = 'Connected';
@@ -442,6 +528,21 @@
     }
 
     connect();
+
+    // iOS Safari and Android Chrome both suspend WebSockets when the tab is
+    // backgrounded or the screen locks, and the close event does not reliably
+    // fire. Without this the dashboard comes back showing "Connected" while
+    // the socket is dead. Re-check on resume and reconnect if needed.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        connStatus.textContent = 'Reconnecting…';
+        liveDot.classList.remove('active');
+        try { socket && socket.close(); } catch (e) {}
+        connect();
+      }
+      loadMatches(false); // list may be stale after time in the background
+    });
   </script>
 </body>
 </html>
