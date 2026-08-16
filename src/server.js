@@ -117,6 +117,8 @@ function liveSnapshot(match) {
     venue: match.venue,
     format: match.matchFormat,
     batters: match.currentBatters,
+    hasScorecard: match.hasScorecard,
+    liveDataAvailable: match.liveDataAvailable,
     at: new Date().toISOString(),
   };
 }
@@ -125,6 +127,17 @@ function liveSnapshot(match) {
  *  and the manual "Digest now" button. */
 async function produceDigest(match, reason) {
   const score = match.innings.find((i) => i.isBatting)?.score || match.status;
+
+  // No innings data means any digest would be a fixture preview dressed up as
+  // a live update. Don't pay for that, and don't show it.
+  if (!match.hasScorecard) {
+    const why = match.liveDataAvailable
+      ? "ESPN hasn't published a scorecard for this match yet."
+      : "ESPN lists this fixture but doesn't provide live scoring for it.";
+    console.log(`[no-data] ${match.team1} v ${match.team2} — ${why}`);
+    broadcast({ type: "nodata", match: `${match.team1} v ${match.team2}`, message: why });
+    return { ok: false, error: why, noData: true };
+  }
   try {
     const digest = await generateDigest(match);
     const entry = {
@@ -278,7 +291,7 @@ app.post("/api/digest-now", async (req, res) => {
     lastMatchState.set(match.matchId, match);
     lastDigestAt.set(match.matchId, Date.now());
     const out = await produceDigest(match, "manual");
-    res.status(out.ok ? 200 : 500).json(out);
+    res.status(out.ok ? 200 : out.noData ? 422 : 500).json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
