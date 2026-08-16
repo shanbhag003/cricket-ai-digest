@@ -66,7 +66,6 @@ polls immediately on startup, then every `POLL_INTERVAL_MINUTES` (default 15
 
 ## 3. Deploy it
 
-Same as the RAID log project — Render or Railway free tier work well:
 1. Push this to a GitHub repo
 2. New Web Service on Render → connect repo → it auto-detects Node
 3. Add the same environment variables from `.env` in the dashboard
@@ -87,18 +86,3 @@ Adjust the persona descriptions there if you want a third audience (e.g. a
 - Claude calls only fire when the match state actually changes (via the
   fingerprint check in `server.js`), not on every poll — keeps Claude cost
   minimal even across a 5-day Test.
-
-## For the portfolio / interview narrative
-
-Suggested framing: *"I prototyped an AI layer that turns a raw sports data
-feed into stakeholder-ready briefings for two different audiences from the
-same event — similar to how B2B broadcast data has to be translated
-differently for different partner needs."* This is honest: it doesn't compete
-with Cricbuzz as a notification product, and doesn't claim to. It's a working
-demonstration of the data-to-decision translation pattern, built against a
-free public cricket data API.
-
-Note: Sportmonks Cricket (a different provider, T20-only on its free tier)
-is the one confirmed to be listed in the `public-apis/public-apis` GitHub
-repo specifically — if you want to credit "found this on the public-apis
-list" in a post, that claim applies to Sportmonks, not CricketData.org.
