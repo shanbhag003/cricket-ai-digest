@@ -243,6 +243,13 @@ function normalizeMatch(summary) {
     currentBatters,
     leaders,
 
+    // ESPN lists fixtures it doesn't actually score. Associate and lower-tier
+    // matches often come back state="in" with linescores: [] and
+    // liveAvailable: false — the match is on, ESPN just isn't covering it.
+    // Verified: liveAvailable is true for matches with real data, false here.
+    hasScorecard: innings.length > 0,
+    liveDataAvailable: Boolean(comp.liveAvailable),
+
     fingerprint:
       innings
         .map((i) => `${i.team}#${i.inningsNumber}:${i.runs}/${i.wickets}@${i.overs}`)
@@ -250,10 +257,6 @@ function normalizeMatch(summary) {
   };
 }
 
-/**
- * Should we spend a Claude call on this change?
- * Runs ticking up by 2 is not news. A wicket is.
- */
 // ---------------------------------------------------------------------------
 // Format-aware materiality
 //
@@ -306,7 +309,6 @@ function detectFormat(comp) {
   if (card.includes("t20") || card.includes("twenty20") || card.includes("hundred")) return "t20";
   if (card.includes("od") || card.includes("list a") || card.includes("one-day")) return "odi";
 
-  // Last resort: a match that isn't limited-overs is a multi-day game.
   return comp?.limitedOvers === false ? "test" : "odi";
 }
 
@@ -322,33 +324,41 @@ function crossedKeyOver(prevOvers, curOvers, keyOvers) {
 /**
  * Should we spend a Claude call on this change?
  * Runs ticking up by 2 is not news. A wicket is.
+ *
+ * Returns null when nothing material happened, otherwise a short reason string.
+ * Truthy/falsy semantics are unchanged, so `if (!isMaterialChange(...))` still
+ * works — but the reason lets us label the digest and read the logs.
  */
 export function isMaterialChange(prev, next) {
-  if (!prev) return true;
-  if (prev.status !== next.status) return true;
-  if (prev.statusDetail !== next.statusDetail) return true; // rain delay etc.
-  if (prev.innings.length !== next.innings.length) return true; // new innings
+  if (!prev) return "first-sighting";
+  if (prev.status !== next.status) return "status";
+  if (prev.statusDetail !== next.statusDetail) return "status-detail";
+  if (prev.innings.length !== next.innings.length) return "innings";
 
   const cur = next.innings.find((i) => i.isBatting);
   const old = prev.innings.find((i) => i.isBatting);
-  if (!cur || !old) return true;
+  if (!cur || !old) return "innings";
 
   const r = getFormatRules(next);
 
-  if (cur.wickets !== old.wickets) return true;   // wicket
-  if (cur.followOn !== old.followOn) return true; // follow-on enforced
-  if (cur.target !== old.target) return true;     // chase target set
-
-  if (Math.floor(cur.runs / r.teamRunStep) !== Math.floor(old.runs / r.teamRunStep)) return true;
-  if (Math.floor(cur.overs / r.overStep) !== Math.floor(old.overs / r.overStep)) return true;
-  if (crossedKeyOver(old.overs, cur.overs, r.keyOvers)) return true;
+  if (cur.wickets !== old.wickets) return "wicket";
+  if (cur.followOn !== old.followOn) return "follow-on";
+  if (cur.target !== old.target) return "target";
 
   for (const b of next.currentBatters) {
     const before = prev.currentBatters.find((p) => p.name === b.name);
-    if (!before) return true; // new batter at the crease
+    if (!before) return "new-batter";
     if (Math.floor(b.runs / r.batterRunStep) !== Math.floor(before.runs / r.batterRunStep)) {
-      return true; // fifty / century
+      return "batter-milestone";
     }
   }
-  return false;
+
+  if (Math.floor(cur.runs / r.teamRunStep) !== Math.floor(old.runs / r.teamRunStep)) {
+    return "team-milestone";
+  }
+  if (crossedKeyOver(old.overs, cur.overs, r.keyOvers)) return "key-over";
+  if (Math.floor(cur.overs / r.overStep) !== Math.floor(old.overs / r.overStep)) {
+    return "over-mark";
+  }
+  return null;
 }
