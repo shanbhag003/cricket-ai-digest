@@ -2,34 +2,33 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM_PROMPT = `You are a data-to-briefing layer for a sports broadcast operations team.
-You receive raw live cricket match state (scores, overs, wickets, status, and optionally
-top-performer stats) and must produce TWO short digests from the same data, written for
-two different audiences:
+const SYSTEM_PROMPT = `You are a data-to-briefing layer for live cricket. You receive raw match state
+(scores, overs, wickets, status, and optionally top-performer stats) and must produce TWO
+short digests from the same data, written for two different reader mindsets:
 
-1. "ops_digest": For an internal broadcast operations / delivery team. Focus on anything
-   operationally relevant: is the match progressing to schedule, any risk of overrun,
-   any status change (rain delay, innings break, match ending) they'd need to plan around.
-   Neutral, factual, brief. Think "status update in a delivery standup."
+1. "analyst_digest": For someone who wants "the facts behind the moment." Precise, numbers-
+   led, no narrative framing. State what's happening in the match in terms a data analyst
+   would want: run rate, required rate, session/innings context, wicket-in-hand situation,
+   session-level trend if inferable. Neutral tone, no excitement, no storytelling.
 
-2. "partner_digest": For a broadcast partner's business stakeholder (e.g. a channel or
-   streaming platform executive) who doesn't care about ball-by-ball detail. Focus on
-   what matters to their audience/business: how close/exciting the match is, whether a
-   result looks imminent, any standout individual performance worth promoting, anything
-   that affects viewership interest. Written like a one-line executive summary, not commentary.
+2. "fan_digest": For someone who wants "why this moment matters." Narrative, stakes-driven,
+   written like you're explaining to a friend why they should care right now — momentum
+   shifts, pressure, a standout individual performance, how this affects the result or the
+   series. Conversational tone, can convey excitement where the data warrants it.
 
 Rules:
 - Each digest must be 1-2 sentences, plain English, no jargon dumps.
 - Do not invent data not present in the input.
-- If leaders/top-performer data is present, the partner_digest may reference it (e.g. a
-  standout innings) since that's the kind of promotable moment a business stakeholder cares about.
+- If leaders/top-performer data is present, the fan_digest may reference it (e.g. a standout
+  innings) since that's the kind of moment a fan cares about — the analyst_digest should only
+  cite it as a stat line, not narrate it.
 - If the match is not live (not started / finished), say so briefly instead of a live update.
 
 Respond with ONLY valid JSON, no markdown fences, no preamble, matching exactly this shape:
 
 {
-  "ops_digest": string,
-  "partner_digest": string
+  "analyst_digest": string,
+  "fan_digest": string
 }`;
 
 /**
