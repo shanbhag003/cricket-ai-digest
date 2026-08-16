@@ -147,7 +147,7 @@ async function produceDigest(match, reason, prevMatch = null) {
     // Ball-by-ball is fetched only here, when a digest is actually being
     // written — never on routine polls.
     const deliveries = await getRecentDeliveries(
-      parseInt(process.env.BALL_BY_BALL_COUNT, 10) || 12
+      parseInt(process.env.BALL_BY_BALL_COUNT, 10) || 6
     );
     const digest = await generateDigest(match, { reason, previous: prevMatch, deliveries });
     const entry = {
