@@ -265,6 +265,25 @@ app.post("/api/track", async (req, res) => {
   pollAndDigest().catch((e) => console.error("post-switch poll failed:", e.message));
 });
 
+// Manual "Digest now" — bypasses the materiality gate. The console is the only
+// consumer, so an on-demand brief is exactly what you want when you open it
+// mid-match and the score hasn't moved yet.
+app.post("/api/digest-now", async (req, res) => {
+  try {
+    const matches = await getLiveMatches({ force: true });
+    if (matches.length === 0) {
+      return res.status(404).json({ error: "No match currently tracked." });
+    }
+    const match = matches[0];
+    lastMatchState.set(match.matchId, match);
+    lastDigestAt.set(match.matchId, Date.now());
+    const out = await produceDigest(match, "manual");
+    res.status(out.ok ? 200 : 500).json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/history", (req, res) => res.json({ history: digestHistory }));
 
 app.get("/health", (req, res) =>
@@ -283,6 +302,13 @@ app.get("/api/debug/raw", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message, stats });
   }
+});
+
+// Any unmatched /api/* route returns JSON, not Express's default HTML error
+// page. Without this a missing route surfaces in the browser as the useless
+// "Unexpected token '<'" JSON parse error instead of naming the problem.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `No such API route: ${req.method} ${req.originalUrl}` });
 });
 
 wss.on("connection", (ws) => {
